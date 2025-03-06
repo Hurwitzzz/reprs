@@ -64,14 +64,14 @@ class OctupleEncodingSettings(ReprSettingsBase):
 OctupleToken = namedtuple(
     "OctupleToken",
     field_names=(
-        "bar",
-        "position",
-        "instrument",
-        "pitch",
-        "duration",
-        "velocity",
-        "time_sig",
-        "tempo",
+        "bar", #256
+        "position", #128
+        "instrument", #129
+        "pitch", #256
+        "duration", #128
+        "velocity", #32 (2 - 126)
+        "time_sig", #254
+        "tempo", # 49 (16-256)
     ),
 )
 

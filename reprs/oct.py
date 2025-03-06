@@ -225,6 +225,134 @@ class OctupleEncoding:
             apply_random_bar_index_offset_when_segmenting
         )
 
+    def segment_by_bar(
+        self,
+        window_bars: int,
+        hop_bars: int | None = None,
+        start_i: int | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Segment the encoding by complete bars.
+        
+        Args:
+            window_bars: Number of bars in each segment
+            hop_bars: Number of bars to hop for each segment (defaults to window_bars)
+            start_i: Starting bar index (defaults to random if None)
+        
+        Yields:
+            Segments containing complete bars
+        """
+        if hop_bars is None:
+            hop_bars = window_bars
+            
+        encoding = self._tokens
+        
+        # Extract all unique bar numbers in order
+        bar_numbers = []
+        bar_indices = {}  # Maps bar number to indices of events in that bar
+        
+        for i, token in enumerate(encoding):
+            bar_num = token[OCT_BAR_I]
+            if bar_num not in bar_indices:
+                bar_numbers.append(bar_num)
+                bar_indices[bar_num] = []
+            bar_indices[bar_num].append(i)
+        
+        # Sort bar numbers in ascending order
+        bar_numbers.sort()
+        
+        # Determine start position
+        if start_i is None:
+            breakpoint() # (Hewei 2025-03-06) I don't know when start_i will be "None". I set a breakpoint here to avoid unexpected consequences when 'start_i' is 'None'.
+            if len(bar_numbers) > window_bars:
+                start_bar_idx = random.randint(0, len(bar_numbers) - window_bars)
+            else:
+                start_bar_idx = 0
+        else:
+            # Find index of the bar that contains or follows start_i
+            for idx, bar_num in enumerate(bar_numbers):
+                if min(bar_indices[bar_num]) >= start_i:
+                    start_bar_idx = idx
+                    break
+            else:
+                start_bar_idx = 0
+        
+        # Generate segments by bar windows
+        for bar_pos in range(start_bar_idx, len(bar_numbers), hop_bars):
+            end_bar_pos = min(bar_pos + window_bars, len(bar_numbers))
+            
+            # Get the bar numbers for this segment
+            segment_bars = bar_numbers[bar_pos:end_bar_pos]
+            if not segment_bars:
+                continue
+                
+            # Get the first and last event indices for this bar segment
+            L = min(bar_indices[segment_bars[0]])
+            R = max(bar_indices[segment_bars[-1]])
+            
+            # Apply bar index offset if needed
+            if self._apply_random_bar_index_offset:
+                bar_index_min = segment_bars[0]
+                bar_index_max = segment_bars[-1]
+                
+                offset_lower_bound = -bar_index_min
+                offset_upper_bound = BAR_MAX - 1 - bar_index_max
+                bar_index_offset = (
+                    random.randint(offset_lower_bound, offset_upper_bound)
+                    if offset_lower_bound <= offset_upper_bound
+                    else offset_lower_bound
+                )
+            else:
+                bar_index_offset = 0
+            
+            # Build segment
+            e_segment = []
+            feature_segments = defaultdict(list)
+            segment_onset = self._onsets[L]
+            segment_indices = []
+            
+            for index in range(L, R + 1):
+                octuple = encoding[index]
+                if (
+                    octuple[OCT_BAR_I] is None
+                    or octuple[OCT_BAR_I] + bar_index_offset < BAR_MAX
+                ):
+                    segment_indices.append(self._df_indices[index])
+                    e_segment.append(octuple)
+                    for name, feature in self._features.items():
+                        feature_segments[name].append(feature[index])
+                else: # TODO: add logger.error() here
+                    break
+            
+            # Format output the same way as segment()
+            output_words = (
+                (["<s>"] * TOKENS_PER_NOTE)
+                + [
+                    (
+                        "<{}-{}>".format(j, k if j > 0 else k + bar_index_offset)
+                        if k is not None
+                        else "<unk>"
+                    )
+                    for octuple in e_segment
+                    for j, k in enumerate(octuple)
+                ]
+                + (["</s>"] * (TOKENS_PER_NOTE - 1))
+            )
+            
+            output_features = {
+                feature_name: ["<s>"] + feature_values
+                for feature_name, feature_values in feature_segments.items()
+            }
+            
+            yield {
+                "input": output_words,
+                "segment_onset": segment_onset,
+                "df_indices": segment_indices,
+                "source_id": self._source_id,
+                "bar_start": segment_bars[0],
+                "bar_end": segment_bars[-1],
+            } | output_features
+        
+
     def segment(
         self,
         window_len: int,

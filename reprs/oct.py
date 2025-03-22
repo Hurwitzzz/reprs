@@ -230,43 +230,53 @@ class OctupleEncoding:
         window_bars: int,
         hop_bars: int | None = None,
         start_i: int | None = None,
+        context_windows: int = 2,
+        target_bars: int = 3,
     ) -> Iterator[dict[str, Any]]:
-        """Segment the encoding by complete bars.
+        """Segment the encoding by bars.
         
         Args:
-            window_bars: Number of bars in each segment
-            hop_bars: Number of bars to hop for each segment (defaults to window_bars)
-            start_i: Starting bar index (defaults to random if None)
-        
-        Yields:
-            Segments containing complete bars
+            window_bars: Number of bars in each segment (total window size)
+            hop_bars: Number of bars to hop between segments
+            start_i: Index to start from (in the original encoding)
+            context_windows: Number of context windows on each side of target bars
+            target_bars: Number of target bars in the middle of the segment
+            
+        Returns:
+            Iterator of segment dictionaries containing:
+                - segment: The encoded segment
+                - segment_onset: The onset position in the original encoding
+                - df_indices: Indices of the dataframe rows included in this segment
+                - target_bar_indices: List indicating which bars are target bars (1 for target, 0 for context)
         """
         if hop_bars is None:
-            hop_bars = window_bars
-            
-        encoding = self._tokens
+            hop_bars = target_bars  # Default hop to target_bars size
         
-        # Extract all unique bar numbers in order
+        if window_bars != 2 * context_windows + target_bars:
+            print(f"Warning: window_bars ({window_bars}) doesn't match 2*context_windows+target_bars ({2*context_windows+target_bars})")
+            window_bars = 2 * context_windows + target_bars
+        
+        # Group indices by bar number
+        bar_indices = defaultdict(list)
         bar_numbers = []
-        bar_indices = {}  # Maps bar number to indices of events in that bar
         
-        for i, token in enumerate(encoding):
-            bar_num = token[OCT_BAR_I]
-            if bar_num not in bar_indices:
+        for i, octuple in enumerate(self.encoding):
+            bar_num = octuple[0]  # Bar token is at index 0
+            if bar_num is not None and bar_num not in bar_indices:
                 bar_numbers.append(bar_num)
-                bar_indices[bar_num] = []
-            bar_indices[bar_num].append(i)
+            if bar_num is not None:
+                bar_indices[bar_num].append(i)
         
         # Sort bar numbers in ascending order
         bar_numbers.sort()
         
+        # If no bars found, return empty iterator
+        if not bar_numbers:
+            return
+        
         # Determine start position
         if start_i is None:
-            breakpoint() # (Hewei 2025-03-06) I don't know when start_i will be "None". I set a breakpoint here to avoid unexpected consequences when 'start_i' is 'None'.
-            if len(bar_numbers) > window_bars:
-                start_bar_idx = random.randint(0, len(bar_numbers) - window_bars)
-            else:
-                start_bar_idx = 0
+            start_bar_idx = 0
         else:
             # Find index of the bar that contains or follows start_i
             for idx, bar_num in enumerate(bar_numbers):
@@ -276,82 +286,75 @@ class OctupleEncoding:
             else:
                 start_bar_idx = 0
         
-        # Generate segments by bar windows
-        for bar_pos in range(start_bar_idx, len(bar_numbers), hop_bars):
-            end_bar_pos = min(bar_pos + window_bars, len(bar_numbers))
-            
-            # Get the bar numbers for this segment
-            segment_bars = bar_numbers[bar_pos:end_bar_pos]
-            if not segment_bars:
-                continue
-                
-            # Get the first and last event indices for this bar segment
-            L = min(bar_indices[segment_bars[0]])
-            R = max(bar_indices[segment_bars[-1]])
-            
-            # Apply bar index offset if needed
-            if self._apply_random_bar_index_offset:
-                bar_index_min = segment_bars[0]
-                bar_index_max = segment_bars[-1]
-                
-                offset_lower_bound = -bar_index_min
-                offset_upper_bound = BAR_MAX - 1 - bar_index_max
-                bar_index_offset = (
-                    random.randint(offset_lower_bound, offset_upper_bound)
-                    if offset_lower_bound <= offset_upper_bound
-                    else offset_lower_bound
-                )
+        # Generate segments
+        total_bars = len(bar_numbers)
+        
+        # Handle special cases for beginning and end of piece
+        for segment_idx in range(0, total_bars, hop_bars):
+            # Calculate bounds for this segment
+            if segment_idx == 0:
+                # Beginning of piece: include as many bars as possible up to window_bars
+                seg_start_idx = 0
+                seg_end_idx = min(window_bars, total_bars)
+            elif segment_idx + window_bars > total_bars:
+                # End of piece: include last window_bars bars or as many as available
+                seg_end_idx = total_bars
+                seg_start_idx = max(0, seg_end_idx - window_bars)
             else:
-                bar_index_offset = 0
+                # Middle of piece: standard window placement
+                seg_start_idx = segment_idx
+                seg_end_idx = min(segment_idx + window_bars, total_bars)
             
-            # Build segment
-            e_segment = []
-            feature_segments = defaultdict(list)
-            segment_onset = self._onsets[L]
-            segment_indices = []
+            # Skip if segment is too small
+            if seg_end_idx - seg_start_idx < target_bars:
+                continue
             
-            for index in range(L, R + 1):
-                octuple = encoding[index]
-                if (
-                    octuple[OCT_BAR_I] is None
-                    or octuple[OCT_BAR_I] + bar_index_offset < BAR_MAX
-                ):
-                    segment_indices.append(self._df_indices[index])
-                    e_segment.append(octuple)
-                    for name, feature in self._features.items():
-                        feature_segments[name].append(feature[index])
-                else: # TODO: add logger.error() here
-                    break
+            # Identify target bars for this segment
+            target_bar_indices = []
             
-            # Format output the same way as segment()
-            output_words = (
-                (["<s>"] * TOKENS_PER_NOTE)
-                + [
-                    (
-                        "<{}-{}>".format(j, k if j > 0 else k + bar_index_offset)
-                        if k is not None
-                        else "<unk>"
-                    )
-                    for octuple in e_segment
-                    for j, k in enumerate(octuple)
-                ]
-                + (["</s>"] * (TOKENS_PER_NOTE - 1))
-            )
+            # Special handling for beginning of piece
+            if seg_start_idx == 0:
+                # First target_bars are targets
+                for i in range(seg_end_idx):
+                    target_bar_indices.append(1 if i < target_bars else 0)
+            # Special handling for end of piece
+            elif seg_end_idx == total_bars:
+                # Last target_bars are targets
+                for i in range(seg_start_idx, seg_end_idx):
+                    bar_pos = i - seg_start_idx
+                    remaining_bars = seg_end_idx - i
+                    target_bar_indices.append(1 if remaining_bars <= target_bars else 0)
+            # Standard case (middle of piece)
+            else:
+                for i in range(seg_start_idx, seg_end_idx):
+                    bar_pos = i - seg_start_idx
+                    # Middle bars are targets
+                    target_bar_indices.append(1 if context_windows <= bar_pos < context_windows + target_bars else 0)
+
+            # Get the bar numbers for this segment
+            segment_bar_numbers = bar_numbers[seg_start_idx:seg_end_idx]
             
-            output_features = {
-                feature_name: ["<s>"] + feature_values
-                for feature_name, feature_values in feature_segments.items()
-            }
+            # Determine the actual encoding indices for this segment
+            indices = []
+            for bar_num in segment_bar_numbers:
+                indices.extend(bar_indices[bar_num])
+            
+            # Extract the segment from the encoding
+            segment = [self.encoding[i] for i in indices]
+            segment_onset = min(indices)
+            
+            # Include the dataframe indices if available
+            df_indices = []
+            if hasattr(self, "df_indices"):
+                df_indices = [self.df_indices[i] for i in indices]
             
             yield {
-                "input": output_words,
+                "segment": segment,
                 "segment_onset": segment_onset,
-                "df_indices": segment_indices,
-                "source_id": self._source_id,
-                "bar_start": segment_bars[0],
-                "bar_end": segment_bars[-1],
-            } | output_features
-        
+                "df_indices": df_indices,
+                "target_bar_indices": target_bar_indices,
+                "bar_numbers": segment_bar_numbers,
+            }        
 
     def segment(
         self,

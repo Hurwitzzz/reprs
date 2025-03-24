@@ -312,57 +312,31 @@ class OctupleEncoding:
             
             # Identify target bars for this segment
             target_bar_masks = []
-            
-            # Create a relative position mapping
-            relative_bar_positions = {
-                "context_pre": [],
-                "target": [],
-                "context_post": []
-            }
-            
+                        
             # Special handling for beginning of piece
             if seg_start_idx == 0:
                 # First target_bars are targets
                 for i in range(seg_end_idx):
-                    rel_i = i  # Relative position within the segment
                     is_target = i < target_bars
                     target_bar_masks.append(1 if is_target else 0)
-                    
-                    if is_target:
-                        relative_bar_positions["target"].append(rel_i)
-                    else:
-                        relative_bar_positions["context_post"].append(rel_i)
                         
             # Special handling for end of piece
             elif seg_end_idx == total_bars:
                 # Last target_bars are targets
                 for i in range(seg_start_idx, seg_end_idx):
-                    rel_i = i - seg_start_idx  # Relative position within the segment
                     bar_pos = i - seg_start_idx
                     remaining_bars = seg_end_idx - i
                     is_target = remaining_bars <= target_bars
                     target_bar_masks.append(1 if is_target else 0)
-                    
-                    if is_target:
-                        relative_bar_positions["target"].append(rel_i)
-                    else:
-                        relative_bar_positions["context_pre"].append(rel_i)
                         
             # Standard case (middle of piece)
             else:
                 for i in range(seg_start_idx, seg_end_idx):
-                    rel_i = i - seg_start_idx  # Relative position within the segment
                     bar_pos = i - seg_start_idx
                     # Middle bars are targets
                     is_target = context_windows <= bar_pos < context_windows + target_bars
                     target_bar_masks.append(1 if is_target else 0)
                     
-                    if rel_i < context_windows:
-                        relative_bar_positions["context_pre"].append(rel_i)
-                    elif rel_i >= context_windows + target_bars:
-                        relative_bar_positions["context_post"].append(rel_i)
-                    else:
-                        relative_bar_positions["target"].append(rel_i)
 
             # Get the bar numbers for this segment # (Hewei) FIXME: useless
             segment_bar_numbers = bar_numbers[seg_start_idx:seg_end_idx]
@@ -381,25 +355,6 @@ class OctupleEncoding:
             df_indices = []
             if hasattr(self, "_df_indices"):
                 df_indices = [self._df_indices[i] for i in indices]
-            
-            # Add relative bar indexing
-            bar_indexing = {
-                "relative_to_segment": {},   # Maps indices like 0, 1, 2 to positions in the segment
-                "relative_to_target": {}     # Maps indices like -2, -1, 0, 1, 2 relative to first target bar
-            }
-            
-            # Build relative-to-segment indexing
-            for i, bar_num in enumerate(segment_bar_numbers):
-                bar_indexing["relative_to_segment"][i] = segment_bar_numbers.index(bar_num)
-            
-            # Build relative-to-target indexing
-            try:
-                first_target_idx = target_bar_masks.index(1)
-                for i, bar_num in enumerate(segment_bar_numbers):
-                    bar_indexing["relative_to_target"][i - first_target_idx] = segment_bar_numbers.index(bar_num)
-            except ValueError:
-                # No target bars found, skip relative-to-target indexing
-                pass
             
             # (Hewei 2025-03-23) (But I still used it to keep the same as RNBert's design) We don't do the bar_index_offset augmentation for this task to preserve context/target bar identification
             if self._apply_random_bar_index_offset:
@@ -458,8 +413,6 @@ class OctupleEncoding:
                 "target_bar_masks": target_bar_masks,
                 "bar_numbers_wo_offset": segment_bar_numbers,
                 "bar_numbers_w_offset": [bar_num + bar_index_offset for bar_num in segment_bar_numbers],
-                "relative_bar_positions": relative_bar_positions,
-                "bar_indexing": bar_indexing,
             } | output_features
 
     def segment(

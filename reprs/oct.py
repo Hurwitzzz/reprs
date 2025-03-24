@@ -354,7 +354,7 @@ class OctupleEncoding:
             # Include the dataframe indices if available
             df_indices = []
             if hasattr(self, "_df_indices"):
-                df_indices = [self._df_indices[i] for i in indices]
+                df_indices = [int(self._df_indices[i]) for i in indices]
             
             # (Hewei 2025-03-23) (But I still used it to keep the same as RNBert's design) We don't do the bar_index_offset augmentation for this task to preserve context/target bar identification
             if self._apply_random_bar_index_offset:

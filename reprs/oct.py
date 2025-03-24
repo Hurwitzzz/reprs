@@ -244,24 +244,26 @@ class OctupleEncoding:
             
         Returns:
             Iterator of segment dictionaries containing:
-                - segment: The encoded segment
+                - segment: The encoded segment with proper formatting
                 - segment_onset: The onset position in the original encoding
                 - df_indices: Indices of the dataframe rows included in this segment
-                - target_bar_indices: List indicating which bars are target bars (1 for target, 0 for context)
+                - target_bar_masks: List indicating which bars are target bars (1 for target, 0 for context)
+                - bar_numbers: List of bar numbers in the segment
+                - relative_bar_positions: Dictionary mapping relative positions to bar indices
         """
-        if hop_bars is None:
-            hop_bars = target_bars  # Default hop to target_bars size
+        encoding = self._tokens  
         
-        if window_bars != 2 * context_windows + target_bars:
-            print(f"Warning: window_bars ({window_bars}) doesn't match 2*context_windows+target_bars ({2*context_windows+target_bars})")
-            window_bars = 2 * context_windows + target_bars
+        if hop_bars is None:
+            hop_bars = target_bars  
+        
+        assert window_bars == 2 * context_windows + target_bars, f"Error: window_bars ({window_bars}) doesn't match 2*context_windows+target_bars ({2*context_windows+target_bars})"
         
         # Group indices by bar number
         bar_indices = defaultdict(list)
         bar_numbers = []
         
-        for i, octuple in enumerate(self.encoding):
-            bar_num = octuple[0]  # Bar token is at index 0
+        for i, octuple in enumerate(encoding):
+            bar_num = octuple[OCT_BAR_I]  # Bar token is at index 0
             if bar_num is not None and bar_num not in bar_indices:
                 bar_numbers.append(bar_num)
             if bar_num is not None:
@@ -272,7 +274,7 @@ class OctupleEncoding:
         
         # If no bars found, return empty iterator
         if not bar_numbers:
-            return
+            raise ValueError("No bars found in the encoding")
         
         # Determine start position
         if start_i is None:
@@ -288,9 +290,8 @@ class OctupleEncoding:
         
         # Generate segments
         total_bars = len(bar_numbers)
-        
         # Handle special cases for beginning and end of piece
-        for segment_idx in range(0, total_bars, hop_bars):
+        for segment_idx in range(start_bar_idx, total_bars, hop_bars):
             # Calculate bounds for this segment
             if segment_idx == 0:
                 # Beginning of piece: include as many bars as possible up to window_bars
@@ -310,51 +311,156 @@ class OctupleEncoding:
                 continue
             
             # Identify target bars for this segment
-            target_bar_indices = []
+            target_bar_masks = []
+            
+            # Create a relative position mapping
+            relative_bar_positions = {
+                "context_pre": [],
+                "target": [],
+                "context_post": []
+            }
             
             # Special handling for beginning of piece
             if seg_start_idx == 0:
                 # First target_bars are targets
                 for i in range(seg_end_idx):
-                    target_bar_indices.append(1 if i < target_bars else 0)
+                    rel_i = i  # Relative position within the segment
+                    is_target = i < target_bars
+                    target_bar_masks.append(1 if is_target else 0)
+                    
+                    if is_target:
+                        relative_bar_positions["target"].append(rel_i)
+                    else:
+                        relative_bar_positions["context_post"].append(rel_i)
+                        
             # Special handling for end of piece
             elif seg_end_idx == total_bars:
                 # Last target_bars are targets
                 for i in range(seg_start_idx, seg_end_idx):
+                    rel_i = i - seg_start_idx  # Relative position within the segment
                     bar_pos = i - seg_start_idx
                     remaining_bars = seg_end_idx - i
-                    target_bar_indices.append(1 if remaining_bars <= target_bars else 0)
+                    is_target = remaining_bars <= target_bars
+                    target_bar_masks.append(1 if is_target else 0)
+                    
+                    if is_target:
+                        relative_bar_positions["target"].append(rel_i)
+                    else:
+                        relative_bar_positions["context_pre"].append(rel_i)
+                        
             # Standard case (middle of piece)
             else:
                 for i in range(seg_start_idx, seg_end_idx):
+                    rel_i = i - seg_start_idx  # Relative position within the segment
                     bar_pos = i - seg_start_idx
                     # Middle bars are targets
-                    target_bar_indices.append(1 if context_windows <= bar_pos < context_windows + target_bars else 0)
+                    is_target = context_windows <= bar_pos < context_windows + target_bars
+                    target_bar_masks.append(1 if is_target else 0)
+                    
+                    if rel_i < context_windows:
+                        relative_bar_positions["context_pre"].append(rel_i)
+                    elif rel_i >= context_windows + target_bars:
+                        relative_bar_positions["context_post"].append(rel_i)
+                    else:
+                        relative_bar_positions["target"].append(rel_i)
 
-            # Get the bar numbers for this segment
+            # Get the bar numbers for this segment # (Hewei) FIXME: useless
             segment_bar_numbers = bar_numbers[seg_start_idx:seg_end_idx]
             
             # Determine the actual encoding indices for this segment
             indices = []
             for bar_num in segment_bar_numbers:
                 indices.extend(bar_indices[bar_num])
+            indices.sort()  # Ensure indices are in order
             
             # Extract the segment from the encoding
-            segment = [self.encoding[i] for i in indices]
-            segment_onset = min(indices)
+            e_segment = [encoding[i] for i in indices]
+            segment_onset = self._onsets[min(indices)] if indices else 0 
             
             # Include the dataframe indices if available
             df_indices = []
-            if hasattr(self, "df_indices"):
-                df_indices = [self.df_indices[i] for i in indices]
+            if hasattr(self, "_df_indices"):
+                df_indices = [self._df_indices[i] for i in indices]
             
+            # Add relative bar indexing
+            bar_indexing = {
+                "relative_to_segment": {},   # Maps indices like 0, 1, 2 to positions in the segment
+                "relative_to_target": {}     # Maps indices like -2, -1, 0, 1, 2 relative to first target bar
+            }
+            
+            # Build relative-to-segment indexing
+            for i, bar_num in enumerate(segment_bar_numbers):
+                bar_indexing["relative_to_segment"][i] = segment_bar_numbers.index(bar_num)
+            
+            # Build relative-to-target indexing
+            try:
+                first_target_idx = target_bar_masks.index(1)
+                for i, bar_num in enumerate(segment_bar_numbers):
+                    bar_indexing["relative_to_target"][i - first_target_idx] = segment_bar_numbers.index(bar_num)
+            except ValueError:
+                # No target bars found, skip relative-to-target indexing
+                pass
+            
+            # (Hewei 2025-03-23) (But I still used it to keep the same as RNBert's design) We don't do the bar_index_offset augmentation for this task to preserve context/target bar identification
+            if self._apply_random_bar_index_offset:
+                bar_index_min = 0
+                bar_index_max = 0
+
+                if len(segment_bar_numbers) > 0:
+                    bar_index_min = segment_bar_numbers[0]
+                    bar_index_max = segment_bar_numbers[-1]
+
+                # to make bar index distribute in [0, bar_max)
+                # Malcolm: i.e., to get a uniform distribution over bar numbers
+                offset_lower_bound = -bar_index_min
+                offset_upper_bound = BAR_MAX - 1 - bar_index_max
+                bar_index_offset = (
+                    random.randint(offset_lower_bound, offset_upper_bound)
+                    if offset_lower_bound <= offset_upper_bound
+                    else offset_lower_bound
+                )
+            else:
+                bar_index_offset = 0
+            
+            # Format the output similar to segment() method
+            output_words = (
+                (["<s>"] * TOKENS_PER_NOTE)
+                + [
+                    (
+                        "<{}-{}>".format(j, k if j > 0 else k + bar_index_offset)
+                        if k is not None
+                        else "<unk>"
+                    )
+                    for octuple in e_segment
+                    for j, k in enumerate(octuple)
+                ]
+                + (["</s>"] * (TOKENS_PER_NOTE - 1))
+            )
+            
+            # Prepare feature segments if available
+            feature_segments = defaultdict(list)
+            if hasattr(self, "_features"):
+                for name, feature in self._features.items():
+                    feature_segments[name] = [feature[i] for i in indices]
+            
+            output_features = {
+                feature_name: ["<s>"] + feature_values
+                for feature_name, feature_values in feature_segments.items()
+            }
+
+            for output_feature in output_features.values():
+                assert (len(output_feature) + 1) * 8 == len(output_words) + 1
+                
             yield {
-                "segment": segment,
+                "input": output_words,
                 "segment_onset": segment_onset,
                 "df_indices": df_indices,
-                "target_bar_indices": target_bar_indices,
-                "bar_numbers": segment_bar_numbers,
-            }        
+                "target_bar_masks": target_bar_masks,
+                "bar_numbers_wo_offset": segment_bar_numbers,
+                "bar_numbers_w_offset": [bar_num + bar_index_offset for bar_num in segment_bar_numbers],
+                "relative_bar_positions": relative_bar_positions,
+                "bar_indexing": bar_indexing,
+            } | output_features
 
     def segment(
         self,

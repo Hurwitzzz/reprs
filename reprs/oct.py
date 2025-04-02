@@ -230,8 +230,8 @@ class OctupleEncoding:
         window_bars: int,
         hop_bars: int | None = None,
         start_i: int | None = None,
-        context_windows: int = 2,
-        target_bars: int = 3,
+        context_windows: int | None = None,
+        target_bars: int | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Segment the encoding by bars.
         
@@ -255,8 +255,8 @@ class OctupleEncoding:
         
         if hop_bars is None:
             hop_bars = target_bars  
-        
-        assert window_bars == 2 * context_windows + target_bars, f"Error: window_bars ({window_bars}) doesn't match 2*context_windows+target_bars ({2*context_windows+target_bars})"
+        if context_windows is not None and target_bars is not None:
+            assert window_bars == 2 * context_windows + target_bars, f"Error: window_bars ({window_bars}) doesn't match 2*context_windows+target_bars ({2*context_windows+target_bars})"
         
         # Group indices by bar number
         bar_indices = defaultdict(list)

@@ -209,6 +209,7 @@ class OctupleEncoding:
         features: dict[str, list[Any]],
         onsets: list[float | Fraction],
         df_indices: list[int],
+        phrase_beg: list[bool] = [],
         source_id: str = "unknown",
         apply_random_bar_index_offset_when_segmenting: bool = True,
     ):
@@ -220,10 +221,166 @@ class OctupleEncoding:
         self._features = features
         self._onsets = onsets
         self._df_indices = df_indices
+        self._phrase_beg = phrase_beg
         self._source_id = source_id
         self._apply_random_bar_index_offset = (
             apply_random_bar_index_offset_when_segmenting
         )
+
+    def segment_by_phrase(
+        self,
+        max_num_notes: int,
+        num_context_bars: int,
+        combine_adjacent_short_phrase: bool,
+        split_long_phrase: bool,
+    ) -> Iterator[dict[str, Any]]:
+        """
+        Segments the encoding by musical phrases.
+
+        Args:
+            max_num_notes: The max number of notes in each segment's target phrases.
+            num_context_bars: Number of context bars on each side of the target phrase bars.
+            combine_adjacent_short_phrase: Whether to combine adjacent short phrases.
+            split_long_phrase: Whether to split a long phrase into multiple segments.
+
+        Returns:
+            Iterator of segment dictionaries.
+        """
+        encoding = self._tokens
+        if not self._phrase_beg or not any(self._phrase_beg):
+            raise ValueError(f"No phrase beginnings found in the encoding. ")
+
+        # 1. Group token indices by bar number
+        bar_indices = defaultdict(list)
+        for i, octuple in enumerate(encoding):
+            bar_num = octuple[OCT_BAR_I]
+            if bar_num is not None:
+                bar_indices[bar_num].append(i)
+        
+        all_bar_numbers = sorted(bar_indices.keys())
+        if not all_bar_numbers:
+            raise ValueError(f"No bar numbers found in the encoding. Ensure the encoding contains valid bar information.")
+        
+        # 2. Identify phrase boundaries and collect phrase info
+        phrase_start_indices = [i for i, is_start in enumerate(self._phrase_beg) if is_start]
+        phrases = []
+        for i, start_idx in enumerate(phrase_start_indices):
+            end_idx = phrase_start_indices[i + 1] if i + 1 < len(phrase_start_indices) else len(encoding)
+            phrase_tokens = encoding[start_idx:end_idx]
+            
+            note_count = len(phrase_tokens)
+            if note_count == 0:
+                raise ValueError(f"Phrase at indices {start_idx}-{end_idx} contains no notes. Ensure the encoding is valid and contains note information.")
+
+            phrase_bars = sorted(list(set(t[OCT_BAR_I] for t in phrase_tokens if t[OCT_BAR_I] is not None)))
+            if not phrase_bars:
+                raise ValueError(f"Phrase at indices {start_idx}-{end_idx} contains no valid bars. Ensure the encoding is valid and contains bar information.")
+
+            phrases.append({
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "note_count": note_count,
+                "bars": phrase_bars,
+            })
+
+        # 3. Process phrases to create segments
+        phrase_idx = 0
+        while phrase_idx < len(phrases):
+            # 3.1. Combine short phrases if enabled
+            target_phrases = [phrases[phrase_idx]]
+            current_note_count = phrases[phrase_idx]["note_count"]
+            
+            if combine_adjacent_short_phrase:
+                next_phrase_idx = phrase_idx + 1
+                while next_phrase_idx < len(phrases) and \
+                      (current_note_count + phrases[next_phrase_idx]["note_count"]) <= max_num_notes:
+                    target_phrases.append(phrases[next_phrase_idx])
+                    current_note_count += phrases[next_phrase_idx]["note_count"]
+                    next_phrase_idx += 1
+            
+            target_bars = sorted(list(set(bar for p in target_phrases for bar in p["bars"])))
+            
+            # 3.2. Split long phrases if enabled
+            phrase_segments_bars = [target_bars]
+            if split_long_phrase and current_note_count > max_num_notes:
+                phrase_segments_bars = []
+                current_segment_bars = []
+                current_segment_notes = 0
+                
+                for bar in target_bars:
+                    bar_note_count = len(bar_indices[bar])
+                    if current_segment_notes + bar_note_count > max_num_notes and current_segment_bars:
+                        phrase_segments_bars.append(current_segment_bars)
+                        current_segment_bars = []
+                        current_segment_notes = 0
+                    
+                    current_segment_bars.append(bar)
+                    current_segment_notes += bar_note_count
+                
+                if current_segment_bars:
+                    phrase_segments_bars.append(current_segment_bars)
+
+            # 3.3. Yield segments for the current phrase(s)
+            for seg_target_bars in phrase_segments_bars:
+                if not seg_target_bars:
+                    raise ValueError(f"Segment target bars are empty for phrase index {phrase_idx}. Ensure the phrase contains valid bar information.")
+
+                # 3.4. Add context bars
+                min_bar, max_bar = seg_target_bars[0], seg_target_bars[-1]
+                min_bar_idx = all_bar_numbers.index(min_bar)
+                max_bar_idx = all_bar_numbers.index(max_bar)
+
+                context_start_idx = max(0, min_bar_idx - num_context_bars)
+                context_end_idx = min(len(all_bar_numbers), max_bar_idx + 1 + num_context_bars)
+                
+                segment_bar_numbers = all_bar_numbers[context_start_idx:context_end_idx]
+                
+                # 3.5. Create the segment dictionary
+                indices = sorted([idx for bar in segment_bar_numbers for idx in bar_indices[bar]])
+                e_segment = [encoding[i] for i in indices]
+                segment_onset = self._onsets[indices[0]] if indices else 0
+                df_indices = [self._df_indices[i] for i in indices] if hasattr(self, "_df_indices") else []
+
+                target_bar_masks = [1 if bar in seg_target_bars else 0 for bar in segment_bar_numbers]
+
+                bar_index_offset = 0
+                if self._apply_random_bar_index_offset:
+                    bar_index_min = segment_bar_numbers[0] if segment_bar_numbers else 0
+                    bar_index_max = segment_bar_numbers[-1] if segment_bar_numbers else 0
+                    offset_lower_bound = -bar_index_min
+                    offset_upper_bound = BAR_MAX - 1 - bar_index_max
+                    if offset_lower_bound <= offset_upper_bound:
+                        bar_index_offset = random.randint(offset_lower_bound, offset_upper_bound)
+
+                output_words = (
+                    (["<s>"] * TOKENS_PER_NOTE) +
+                    [
+                        "<{}-{}>".format(j, k if j > 0 else k + bar_index_offset) if k is not None else "<unk>"
+                        for octuple in e_segment for j, k in enumerate(octuple)
+                    ] +
+                    (["</s>"] * (TOKENS_PER_NOTE - 1))
+                )
+
+                feature_segments = defaultdict(list)
+                if hasattr(self, "_features"):
+                    for name, feature in self._features.items():
+                        feature_segments[name] = [feature[i] for i in indices]
+                
+                output_features = {
+                    feature_name: ["<s>"] + feature_values
+                    for feature_name, feature_values in feature_segments.items()
+                }
+
+                yield {
+                    "input": output_words,
+                    "segment_onset": segment_onset,
+                    "df_indices": df_indices,
+                    "target_bar_masks": target_bar_masks,
+                    "bar_numbers_wo_offset": segment_bar_numbers,
+                    "bar_numbers_w_offset": [b + bar_index_offset for b in segment_bar_numbers],
+                } | output_features
+
+            phrase_idx += len(target_phrases)
 
     def segment_by_bar(
         self,
@@ -651,6 +808,7 @@ def oct_encode(
         music_df = preprocess_df(music_df, settings, sort)
 
     # features = []
+    phrase_beg = []
     onsets = []
     features = defaultdict(list)
     tokens: list[OctupleToken] = []
@@ -688,6 +846,8 @@ def oct_encode(
                 else:
                     features[name].append(note[name])
             onsets.append(note.onset)
+            if hasattr(note, "phrase_beg"):
+                phrase_beg.append(note.phrase_beg)
 
     if len(tokens) == 0:
         return OctupleEncoding([], {}, [], [], source_id=source_id)
@@ -701,7 +861,7 @@ def oct_encode(
     }
 
     encoding = OctupleEncoding(
-        tokens, features, onsets, df_indices, source_id=source_id
+        tokens, features, onsets, df_indices, phrase_beg, source_id=source_id
     )
 
     return encoding

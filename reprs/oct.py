@@ -276,17 +276,7 @@ class OctupleEncoding:
         if not bar_numbers:
             raise ValueError("No bars found in the encoding")
         
-        # Determine start position
-        if start_i is None:
-            start_bar_idx = 0
-        else:
-            # Find index of the bar that contains or follows start_i
-            for idx, bar_num in enumerate(bar_numbers):
-                if min(bar_indices[bar_num]) >= start_i:
-                    start_bar_idx = idx
-                    break
-            else:
-                start_bar_idx = 0
+        start_bar_idx = 0
         
         # Generate segments
         total_bars = len(bar_numbers)
@@ -459,7 +449,7 @@ class OctupleEncoding:
                     random.randint(offset_lower_bound, offset_upper_bound)
                     if offset_lower_bound <= offset_upper_bound
                     else offset_lower_bound
-                )
+                ) # `offset_lower/upper_bound` make sure `k+bar_index_offset` is in [0, BAR_MAX)
             else:
                 bar_index_offset = 0
 
